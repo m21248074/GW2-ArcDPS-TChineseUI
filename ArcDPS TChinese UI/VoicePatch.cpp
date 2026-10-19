@@ -35,6 +35,7 @@ namespace {
     constexpr uint32_t kLanguageUseAudio = 1;   // SetLanguage(lang, use)：0 = 文字，1 = 配音
     constexpr uint32_t kAudioPermittedMask = 45; // 配音「允許語言」遮罩的原版值
     constexpr uint32_t kTextPermittedMask = 63;  // 文字「允許語言」遮罩的原版值
+    constexpr uint32_t kTextUnlockedMask = 61;   // 原工具解鎖後的值
     constexpr size_t kEntryCheckBytes = 32;
 
     // ------------------------------------------------------------------
@@ -118,7 +119,8 @@ namespace {
         return p;
     }
 
-    bool BuildAudioPlan(const DiskImage& img, std::vector<Patch>& out, std::string& err) {
+    // out = 只解鎖配音；textPlan（選用）= 完整解鎖（文字 + 配音），與原工具的 Unlock 相同
+    bool BuildAudioPlan(const DiskImage& img, std::vector<Patch>& out, std::string& err, std::vector<Patch>* textPlan = nullptr) {
         std::set<uint32_t> strs = FindAsciiZ(img, "LanguageIsPermitted(languageText, LANGUAGE_USE_TEXT)");
         for (uint32_t s : FindAsciiZ(img, "LanguageIsPermitted(languageAudio, LANGUAGE_USE_AUDIO)")) strs.insert(s);
         if (strs.empty()) {
@@ -225,6 +227,15 @@ namespace {
         const uint32_t d1 = f.loads[1] > audioMask.rva ? f.loads[1] - audioMask.rva : audioMask.rva - f.loads[1];
         const int blocked = (d1 < d0) ? 1 : 0;
 
+        if (textPlan) {
+            textPlan->clear();
+            textPlan->push_back(audioMask);
+            textPlan->push_back(MakeMask(f.tests[1], kTextUnlockedMask, -1));
+            textPlan->push_back(MakeMask(f.loads[0], 0, 0));
+            textPlan->push_back(MakeMask(f.loads[1], 0, 1));
+            for (const Patch& p : nops) textPlan->push_back(p);
+        }
+
         out.clear();
         out.push_back(audioMask);
         out.push_back(MakeMask(f.loads[blocked], 0, blocked));
@@ -267,7 +278,8 @@ namespace {
 
     std::vector<Applied> g_applied;
 
-    bool ApplyPlan(const std::vector<Patch>& plan, std::string& err) {
+    // record = false：套用後不加入還原清單（文字語言解鎖不能在遊戲結束時還原，否則遊戲收尾時可能斷言失敗）
+    bool ApplyPlan(const std::vector<Patch>& plan, std::string& err, bool record = true) {
         uint8_t* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
         if (!base) {
             err = U8("無法取得遊戲模組");
@@ -330,8 +342,10 @@ namespace {
             }
         }
 
-        for (size_t idx : written) {
-            g_applied.push_back({ reinterpret_cast<uintptr_t>(base + plan[idx].rva), current[idx] });
+        if (record) {
+            for (size_t idx : written) {
+                g_applied.push_back({ reinterpret_cast<uintptr_t>(base + plan[idx].rva), current[idx] });
+            }
         }
         return true;
     }
@@ -350,7 +364,8 @@ namespace {
     // ------------------------------------------------------------------
     struct Analysis {
         uint32_t setLanguageRva = 0;
-        std::vector<Patch> plan;
+        std::vector<Patch> plan;      // 只解鎖配音
+        std::vector<Patch> textPlan;  // 完整解鎖（文字 + 配音）
         VoicePrepare::Locator locator;
         bool prepareOk = false;
         std::string prepareError;
@@ -381,7 +396,7 @@ namespace {
                     ok = false;
                 }
             }
-            if (ok) ok = BuildAudioPlan(img, result.plan, err);
+            if (ok) ok = BuildAudioPlan(img, result.plan, err, &result.textPlan);
             if (ok) {
                 // 語音準備流程的定位失敗不影響配音切換，只是之後無法自動補齊資源
                 result.prepareOk = VoicePrepare::Resolve(img, result.locator, result.prepareError);
@@ -421,6 +436,15 @@ namespace {
     // ------------------------------------------------------------------
     // 主執行緒狀態機
     // ------------------------------------------------------------------
+    // 其他模組（簡體中文新方式）也需要這份分析；只在第一次啟動
+    void StartAnalysisIfNeeded() {
+        int expected = 0;
+        if (g_analysisState.compare_exchange_strong(expected, 1)) g_worker = std::thread(AnalysisMain);
+    }
+
+    bool g_textUnlocked = false;
+    std::string g_textUnlockError;
+
     enum class Phase { Idle, Analyzing, WaitingCall, Preparing };
 
     Phase g_phase = Phase::Idle;
@@ -513,6 +537,32 @@ namespace VoicePatch {
     bool IsAvailable() { return !g_unavailable; }
 
     const char* StatusText() { return g_status.c_str(); }
+
+    int EnsureTextUnlocked() {
+        if (g_textUnlocked) return 1;
+        if (!g_textUnlockError.empty()) return -1; // 失敗後不再重試，由呼叫端決定退路
+
+        StartAnalysisIfNeeded();
+        const int state = g_analysisState.load(std::memory_order_acquire);
+        if (state == 0 || state == 1) return 0;
+        if (state == 3) {
+            g_textUnlockError = g_analysisError;
+            ArcLog(("[Lang] text language unlock unavailable: " + g_textUnlockError).c_str());
+            return -1;
+        }
+
+        std::string err;
+        if (!ApplyPlan(g_analysis.textPlan, err, false)) {
+            g_textUnlockError = err;
+            ArcLog(("[Lang] text language unlock failed: " + err).c_str());
+            return -1;
+        }
+        g_textUnlocked = true;
+        ArcLog("[Lang] text language unlocked (permitted masks updated, blocked masks cleared)");
+        return 1;
+    }
+
+    const char* TextUnlockError() { return g_textUnlockError.c_str(); }
 
     void Update() {
         MaintainAudioLanguage();

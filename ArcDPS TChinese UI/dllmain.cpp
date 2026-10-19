@@ -1,6 +1,7 @@
 ﻿#include "TabUI.h"
 #include "GW2LangPatch.h" 
 #include "VoicePatch.h"
+#include "ChineseIme.h"
 
 #include <stdexcept>
 #include <string>
@@ -69,6 +70,7 @@ arcdps_exports* init_module() {
 }
 
 void release_module() {
+    ChineseIme::Shutdown();
     VoicePatch::Shutdown();
     GW2LangPatch::Shutdown();
 }
@@ -81,6 +83,7 @@ void options_tab()
 void imgui_callback(uint32_t not_charsel_or_loading, uint32_t hide_if_combat_or_ooc) {
     GW2LangPatch::Update();
     VoicePatch::Update();
+    ChineseIme::Update();
 }
 
 extern "C" __declspec(dllexport) void* get_init_addr(

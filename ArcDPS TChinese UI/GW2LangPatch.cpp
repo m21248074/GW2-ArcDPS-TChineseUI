@@ -1,4 +1,6 @@
 ﻿#include "GW2LangPatch.h"
+#include "ChineseIme.h"
+#include "VoicePatch.h"
 #include <Psapi.h>
 #include <array>
 #include <cstdio>
@@ -26,9 +28,21 @@ namespace {
     constexpr uint32_t kChineseLanguageId = 5;
 
     bool g_initialized = false;
-    bool g_chineseEnabled = false;
-    bool g_hasPendingApply = false;
-    bool g_pendingEnable = false;
+    // 簡體中文（文字語言）：要求的狀態與已套用的狀態分開記錄，差異由 PlanLanguageSteps 排成原生呼叫
+    bool g_chineseWanted = false;  // 使用者或繁體模式要求開啟
+    bool g_fullWanted = false;     // 要求用完整的 SetLanguage（新方式）
+    bool g_tradWanted = false;     // 繁體模式
+    bool g_autoByTrad = false;     // 簡體中文是被繁體模式自動帶開的（取消繁體模式時才需要還原）
+    bool g_applyDirty = false;     // 要求的狀態有變動，需要重新比對
+    int g_appliedMode = 0;         // 已套用：0 未啟用、1 舊方式、2 新方式
+    struct LangStep {
+        uintptr_t function;
+        uint32_t language;
+        bool unlock = false;           // true = 不是原生呼叫，而是「解鎖文字語言」的閘門
+    };
+    std::vector<LangStep> g_langSteps; // 待執行的步驟（依序）
+    int g_modeBeforePlan = 0;          // 排程前已套用的模式（解鎖失敗時要退回）
+    std::string g_langStatus;
     bool g_waitingForDeferredCall = false;
 
     uint32_t g_originalLanguage = 0;
@@ -36,6 +50,11 @@ namespace {
 
     using LanguageSetterFn = void(__fastcall*)(uint32_t languageId);
     LanguageSetterFn g_languageSetter = nullptr;
+
+    // 完整的 SetLanguage(lang, use)。g_languageSetter 只是它內部的「語言已變更」處理函式，
+    // 呼叫它會刷新介面，但不會更新遊戲儲存的語言變數；網頁介面（交易行、商城、魔法庫、兌換所）
+    // 組網址時讀的是那個變數，所以要用完整的 SetLanguage 才會跟著變成中文。
+    uintptr_t g_fullSetter = 0;
 
     uint8_t* g_viewAdvanceTextHookPoint = nullptr;
     uint8_t* g_viewAdvanceTextOriginalCallTarget = nullptr;
@@ -263,6 +282,54 @@ namespace {
         return nullptr;
     }
 
+    std::vector<uint8_t*> FindLeaRipRefsTo(uint8_t* base, size_t size, uint8_t* target) {
+        std::vector<uint8_t*> refs;
+        uintptr_t moduleStart = reinterpret_cast<uintptr_t>(base);
+        uintptr_t moduleEnd = moduleStart + size;
+        uintptr_t current = moduleStart;
+        while (current < moduleEnd) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!VirtualQuery(reinterpret_cast<void*>(current), &mbi, sizeof(mbi))) break;
+            uintptr_t regionStart = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            uintptr_t regionEnd = regionStart + mbi.RegionSize;
+            if (mbi.State == MEM_COMMIT && IsExecutableProtect(mbi.Protect)) {
+                uintptr_t scanStart = regionStart > moduleStart ? regionStart : moduleStart;
+                uintptr_t scanEnd = regionEnd < moduleEnd ? regionEnd : moduleEnd;
+                if (scanEnd > scanStart && scanEnd - scanStart >= 7) {
+                    for (uintptr_t cursor = scanStart; cursor <= scanEnd - 7; ++cursor) {
+                        uint8_t* instr = reinterpret_cast<uint8_t*>(cursor);
+                        if (instr[0] == 0x48 && instr[1] == 0x8D && instr[2] == 0x0D && FollowRel32(instr + 3) == target) {
+                            refs.push_back(instr);
+                        }
+                    }
+                }
+            }
+            current = regionEnd;
+        }
+        return refs;
+    }
+
+    // 以字串 "(unsigned)use < LANGUAGE_USES" 反查引用它的函式，只接受開頭符合 SetLanguage 的那一個：
+    //   mov [rsp+8],rbx; push rdi; sub rsp,20h; movsxd rdi,edx; mov ebx,ecx; cmp ecx,6
+    uintptr_t FindFullSetLanguage(uint8_t* base, size_t size) {
+        static const uint8_t kPrologue[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x63, 0xFA, 0x8B, 0xD9, 0x83, 0xF9, 0x06 };
+        uint8_t* anchor = FindAsciiLiteral(base, size, "(unsigned)use < LANGUAGE_USES");
+        if (!anchor) return 0;
+
+        std::vector<uintptr_t> candidates;
+        for (uint8_t* ref : FindLeaRipRefsTo(base, size, anchor)) {
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(ref), &imageBase, nullptr);
+            if (!entry) continue;
+            uint8_t* start = reinterpret_cast<uint8_t*>(imageBase + entry->BeginAddress);
+            if (!IsReadableAddress(start, sizeof(kPrologue)) || std::memcmp(start, kPrologue, sizeof(kPrologue)) != 0) continue;
+            if (std::find(candidates.begin(), candidates.end(), reinterpret_cast<uintptr_t>(start)) == candidates.end()) {
+                candidates.push_back(reinterpret_cast<uintptr_t>(start));
+            }
+        }
+        return candidates.size() == 1 ? candidates[0] : 0;
+    }
+
     // --- 核心 Hook 邏輯 ---
     bool InstallDeferredCallerHook() {
         if (!g_languageSetter || !g_viewAdvanceTextHookPoint || !g_viewAdvanceTextOriginalCallTarget) return false;
@@ -336,15 +403,51 @@ namespace {
         return true;
     }
 
-    void SetLanguageInternal(uint32_t languageId) {
+    // 排入一個語言呼叫：舊方式是「語言已變更」處理函式，新方式是完整的 SetLanguage(語言, 0)
+    bool QueueLanguageCall(uintptr_t function, uint32_t languageId) {
         if (!g_callerHookInstalled && !InstallDeferredCallerHook()) {
             DebugLog("Failed to install deferred caller hook.");
-            return;
+            return false;
         }
         g_pendingCall.Arg0 = languageId;
         g_pendingCall.Arg1 = 0;
-        g_pendingCall.Function = reinterpret_cast<uintptr_t>(g_languageSetter);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        g_pendingCall.Function = function; // 最後寫入，遊戲執行緒以此判斷有無待處理呼叫
         g_waitingForDeferredCall = true;
+        return true;
+    }
+
+    // 比對「要求的狀態」與「已套用的狀態」，排出需要的呼叫：
+    //   未啟用 → 舊方式：處理函式(5)            未啟用 → 新方式：SetLanguage(5)
+    //   舊方式 → 未啟用：處理函式(原本)          新方式 → 未啟用：SetLanguage(原本)
+    //   舊方式 → 新方式：SetLanguage(5)         新方式 → 舊方式：SetLanguage(原本)，再處理函式(5)
+    void PlanLanguageSteps() {
+        const bool useFull = g_fullWanted && g_fullSetter != 0;
+        const int wanted = g_chineseWanted ? (useFull ? 2 : 1) : 0;
+        if (wanted == g_appliedMode) return;
+
+        const uintptr_t handler = reinterpret_cast<uintptr_t>(g_languageSetter);
+        g_langSteps.clear();
+        g_modeBeforePlan = g_appliedMode;
+        if (wanted == 1) {
+            if (g_appliedMode == 2) g_langSteps.push_back({ g_fullSetter, g_originalLanguage });
+            g_langSteps.push_back({ handler, kChineseLanguageId });
+        }
+        else if (wanted == 2) {
+            // 儲存的語言設成簡體之前，必須先解鎖文字語言，否則進遊戲（載入地圖）時會斷言失敗而崩潰
+            g_langSteps.push_back({ 0, 0, true });
+            g_langSteps.push_back({ g_fullSetter, kChineseLanguageId });
+        }
+        else {
+            g_langSteps.push_back({ g_appliedMode == 2 ? g_fullSetter : handler, g_originalLanguage });
+        }
+        g_appliedMode = wanted;
+    }
+
+    // 商城網頁繁體化：繁體模式開著、簡體中文開著、而且是新方式（網頁才會是中文）才需要；
+    // 舊方式下網頁是英文，不載入轉換腳本。
+    void RefreshWeb() {
+        ChineseIme::SetWebTraditional(g_tradWanted && g_chineseWanted && g_fullWanted && g_fullSetter != 0);
     }
 
     extern "C" void __fastcall CppTextConverterHook(wchar_t* srcText) {
@@ -564,6 +667,19 @@ namespace GW2LangPatch {
         g_originalLanguage = *g_originalLanguagePtr;
         g_languageSetter = reinterpret_cast<LanguageSetterFn>(setterTarget);
 
+        g_fullSetter = FindFullSetLanguage(base, size);
+        {
+            char message[128];
+            if (g_fullSetter) {
+                std::snprintf(message, sizeof(message), "[Lang] full SetLanguage RVA 0x%llX (web UI language follows text language)",
+                    static_cast<unsigned long long>(g_fullSetter - reinterpret_cast<uintptr_t>(base)));
+            }
+            else {
+                std::snprintf(message, sizeof(message), "[Lang] full SetLanguage not found; text switch only refreshes the UI");
+            }
+            ArcLog(message);
+        }
+
         // 2. 解析 Caller Hook Diagnostics
         uint8_t* hookAnchor = FindAsciiLiteral(base, size, kViewAdvanceTextAnchor);
         if (!hookAnchor) return false;
@@ -630,13 +746,28 @@ namespace GW2LangPatch {
     }
 
     bool IsChineseEnabled() {
-        return g_chineseEnabled;
+        return g_chineseWanted;
     }
 
-    void QueueLanguageToggle(bool enable) {
+    const char* LanguageStatusText() {
+        return g_langStatus.c_str();
+    }
+
+    bool IsFullLanguageAvailable() {
+        return g_fullSetter != 0;
+    }
+
+    bool IsFullLanguageMode() {
+        return g_fullWanted && g_fullSetter != 0;
+    }
+
+    void SetChinese(bool enable, bool full) {
         if (!g_initialized) return;
-        g_pendingEnable = enable;
-        g_hasPendingApply = true;
+        g_chineseWanted = enable;
+        if (enable) g_fullWanted = full; // 已開啟時改按另一個按鈕＝立刻換成另一種方式
+        g_autoByTrad = false;            // 使用者手動操作後，簡體中文不再算是繁體模式自動開的
+        g_applyDirty = true;
+        RefreshWeb();
     }
 
     bool QueueNativeCall(uintptr_t function, uint32_t arg0, uint32_t arg1) {
@@ -678,6 +809,28 @@ namespace GW2LangPatch {
         }
     }
 
+    void RequestTraditional(bool enable) {
+        if (!g_initialized) return;
+        g_tradWanted = enable;
+        if (enable) {
+            if (!g_chineseWanted) {
+                g_chineseWanted = true;
+                g_autoByTrad = true;
+                g_applyDirty = true;
+            }
+            SetTradMode(true);
+        }
+        else {
+            SetTradMode(false);
+            if (g_autoByTrad) {
+                g_chineseWanted = false;
+                g_autoByTrad = false;
+                g_applyDirty = true;
+            }
+        }
+        RefreshWeb();
+    }
+
     void Update() {
         if (!g_initialized) return;
 
@@ -686,15 +839,39 @@ namespace GW2LangPatch {
             g_waitingForDeferredCall = false;
         }
 
-        // 處理排隊的 UI 請求
-        // 佇列被其他原生呼叫（例如中文語音）佔用時，等下一幀再處理
-        if (g_hasPendingApply && g_pendingCall.Function == 0) {
-            bool enable = g_pendingEnable;
-            g_hasPendingApply = false;
+        // 要求的狀態有變動：排出需要執行的原生呼叫
+        if (g_applyDirty) {
+            g_applyDirty = false;
+            PlanLanguageSteps();
+        }
 
-            uint32_t target = enable ? kChineseLanguageId : g_originalLanguage;
-            SetLanguageInternal(target);
-            g_chineseEnabled = enable;
+        // 依序執行；佇列被其他原生呼叫（例如中文語音）佔用時，等下一幀
+        if (!g_langSteps.empty()) {
+            const LangStep step = g_langSteps.front();
+            if (step.unlock) {
+                const int unlocked = VoicePatch::EnsureTextUnlocked();
+                if (unlocked > 0) {
+                    g_langSteps.erase(g_langSteps.begin());
+                    g_langStatus.clear();
+                }
+                else if (unlocked < 0) {
+                    // 解鎖失敗就不能用新方式：改回舊方式，並說明原因
+                    g_langSteps.clear();
+                    g_appliedMode = g_modeBeforePlan;
+                    g_fullWanted = false;
+                    g_langStatus = std::string(reinterpret_cast<const char*>(u8"無法解鎖簡體中文，已改用舊方式：")) + VoicePatch::TextUnlockError();
+                    ArcLog(("[Lang] " + g_langStatus).c_str());
+                    g_applyDirty = true;
+                    RefreshWeb();
+                }
+                else {
+                    g_langStatus = reinterpret_cast<const char*>(u8"準備簡體中文（解鎖語言限制）…");
+                }
+            }
+            else if (g_pendingCall.Function == 0) {
+                g_langSteps.erase(g_langSteps.begin());
+                if (!QueueLanguageCall(step.function, step.language)) g_langSteps.clear(); // 掛鉤無法安裝：放棄
+            }
         }
     }
 

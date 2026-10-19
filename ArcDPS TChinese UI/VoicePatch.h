@@ -14,4 +14,11 @@ namespace VoicePatch {
     bool IsBusy();                    // 處理中，UI 應暫時停用
     bool IsAvailable();               // false = 本版遊戲無法適配
     const char* StatusText();         // UTF-8 狀態文字，可能為空字串
+
+    // 簡體中文（新方式）把遊戲儲存的語言設成中文「之前」，必須先解鎖文字語言：
+    // 遊戲進入地圖時會斷言目前的文字語言是否被允許（LanguageIsPermitted(languageText, ...)），
+    // 國際版客戶端預設不允許簡體中文，沒解鎖就會在進遊戲時崩潰。
+    // 回傳 0 = 尚未完成（下一幀再呼叫）、1 = 已解鎖、-1 = 失敗（原因見 TextUnlockError）。
+    int EnsureTextUnlocked();
+    const char* TextUnlockError();
 }
