@@ -163,6 +163,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="ChineseIme.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="GW2LangPatch.cpp" />
     <ClCompile Include="TabUI.cpp" />
@@ -172,6 +173,7 @@
     <ClCompile Include="VoicePrepare.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ChineseIme.h" />
     <ClInclude Include="GW2LangPatch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="TabUI.h" />
