@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <unordered_map>
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #include <fstream>
 
@@ -44,6 +45,7 @@ namespace {
         uintptr_t Function;
         uint64_t Arg0;
         uint64_t CompletedCount;
+        uint64_t Arg1; // 第二個參數（edx）；語言設定函式的 use：0 = 文字、1 = 配音
     };
 
     PendingCallBuffer g_pendingCall{};
@@ -293,6 +295,7 @@ namespace {
         AppendU8(code, 0x0F); AppendU8(code, 0x84); AppendU32(code, 0); // je skip
 
         AppendU8(code, 0x8B); AppendU8(code, 0x4B); AppendU8(code, 0x08); // mov ecx, [rbx+8]
+        AppendU8(code, 0x8B); AppendU8(code, 0x53); AppendU8(code, 0x18); // mov edx, [rbx+0x18]
         AppendU8(code, 0xFF); AppendU8(code, 0xD0); // call rax
         AppendU8(code, 0x48); AppendU8(code, 0xFF); AppendU8(code, 0x43); AppendU8(code, 0x10); // inc qword [rbx+0x10]
         AppendU8(code, 0x48); AppendU8(code, 0xC7); AppendU8(code, 0x03); AppendU32(code, 0); // mov qword [rbx], 0
@@ -339,6 +342,7 @@ namespace {
             return;
         }
         g_pendingCall.Arg0 = languageId;
+        g_pendingCall.Arg1 = 0;
         g_pendingCall.Function = reinterpret_cast<uintptr_t>(g_languageSetter);
         g_waitingForDeferredCall = true;
     }
@@ -635,6 +639,26 @@ namespace GW2LangPatch {
         g_hasPendingApply = true;
     }
 
+    bool QueueNativeCall(uintptr_t function, uint32_t arg0, uint32_t arg1) {
+        if (!g_initialized || !function) return false;
+        if (g_pendingCall.Function != 0) return false;
+        if (!g_callerHookInstalled && !InstallDeferredCallerHook()) return false;
+
+        g_pendingCall.Arg0 = arg0;
+        g_pendingCall.Arg1 = arg1;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        g_pendingCall.Function = function; // 最後寫入，遊戲執行緒以此判斷有無待處理呼叫
+        return true;
+    }
+
+    bool IsNativeCallIdle() {
+        return *reinterpret_cast<volatile uintptr_t*>(&g_pendingCall.Function) == 0;
+    }
+
+    uint32_t* GetLanguagePtr() {
+        return g_originalLanguagePtr;
+    }
+
     bool IsTradModeEnabled() {
         return g_tradModeEnabled;
     }
@@ -663,7 +687,8 @@ namespace GW2LangPatch {
         }
 
         // 處理排隊的 UI 請求
-        if (g_hasPendingApply) {
+        // 佇列被其他原生呼叫（例如中文語音）佔用時，等下一幀再處理
+        if (g_hasPendingApply && g_pendingCall.Function == 0) {
             bool enable = g_pendingEnable;
             g_hasPendingApply = false;
 
