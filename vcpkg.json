@@ -6,7 +6,8 @@
     "imgui",
     "minhook",
     "nlohmann-json",
-    "asmjit"
+    "asmjit",
+    "zydis"
   ],
   "overrides": [
     {
