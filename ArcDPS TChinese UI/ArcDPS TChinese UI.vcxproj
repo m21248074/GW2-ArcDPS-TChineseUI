@@ -166,11 +166,19 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="GW2LangPatch.cpp" />
     <ClCompile Include="TabUI.cpp" />
+    <ClCompile Include="VoiceImage.cpp" />
+    <ClCompile Include="VoiceLifetime.cpp" />
+    <ClCompile Include="VoicePatch.cpp" />
+    <ClCompile Include="VoicePrepare.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="GW2LangPatch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="TabUI.h" />
+    <ClInclude Include="VoiceImage.h" />
+    <ClInclude Include="VoiceLifetime.h" />
+    <ClInclude Include="VoicePatch.h" />
+    <ClInclude Include="VoicePrepare.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Resource.rc" />

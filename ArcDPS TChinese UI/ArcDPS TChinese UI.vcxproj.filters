@@ -24,12 +24,36 @@
     <ClCompile Include="GW2LangPatch.cpp">
       <Filter>來源檔案</Filter>
     </ClCompile>
+    <ClCompile Include="VoiceImage.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="VoiceLifetime.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="VoicePatch.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="VoicePrepare.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TabUI.h">
       <Filter>標頭檔</Filter>
     </ClInclude>
     <ClInclude Include="GW2LangPatch.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="VoiceImage.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="VoiceLifetime.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="VoicePatch.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="VoicePrepare.h">
       <Filter>標頭檔</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">
