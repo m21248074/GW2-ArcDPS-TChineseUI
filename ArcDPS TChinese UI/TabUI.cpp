@@ -1,5 +1,6 @@
 ﻿#include "TabUI.h"
 #include "GW2LangPatch.h"
+#include "VoicePatch.h"
 
 #include <imgui/imgui.h>
 
@@ -19,5 +20,19 @@ void TabUI::Draw() {
 
     if (ImGui::Checkbox(IMGUI_UTF8("簡體轉繁體模式"), &isTradMode)) {
         GW2LangPatch::SetTradMode(isTradMode);
+    }
+
+    bool isVoice = VoicePatch::IsEnabled();
+    const bool voiceDisabled = VoicePatch::IsBusy() || !VoicePatch::IsAvailable();
+    if (voiceDisabled) ImGui::BeginDisabled();
+    if (ImGui::Checkbox(IMGUI_UTF8("中文語音（實驗）"), &isVoice)) {
+        VoicePatch::RequestEnable(isVoice);
+    }
+    if (voiceDisabled) ImGui::EndDisabled();
+
+    const char* voiceStatus = VoicePatch::StatusText();
+    if (voiceStatus && voiceStatus[0]) {
+        ImGui::SameLine();
+        ImGui::TextUnformatted(voiceStatus);
     }
 }
