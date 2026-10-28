@@ -73,8 +73,8 @@
 
 | 檔案 | 來源 | 授權狀況 |
 |---|---|---|
-| `Data/jianfan.json`、`Data/add.json` | 取自「激战2中文切换」工具內嵌的簡繁字典 | 未確認 |
-| `Data/ime/CommerceImeBridge.js` | 取自「激战2中文切换」工具內嵌的輸入法橋接腳本 | 未確認 |
+| `Data/jianfan.json`、`Data/add.json` | 取自「激战2中文切换」工具內嵌的簡繁字典 |  |
+| `Data/ime/CommerceImeBridge.js` | 取自「激战2中文切换」工具內嵌的輸入法橋接腳本 |  |
 | `Data/ime/OriginalBootstrap.js` | 遊戲官方的瀏覽器啟動腳本（用於比對與附加） | 屬於遊戲官方內容 |
 | `Data/ime/TradToSimp.js` | 由 [OpenCC](https://github.com/BYVoid/OpenCC) 的 `TSCharacters.txt` 衍生 | Apache License 2.0 |
 | `Data/ime/SimpToTrad.js`、`PageProbe.js` | 本專案自行撰寫 | MIT |
